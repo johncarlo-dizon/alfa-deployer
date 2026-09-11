@@ -1,0 +1,1026 @@
+config.py
+import sys
+import os
+
+# NOTE: sys.argv[0] is used (not __file__) so this still resolves to the
+# folder the .exe lives in, even when frozen by PyInstaller with --onefile.
+BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+STORES_FILE = os.path.join(BASE_DIR, "stores.txt")
+LOGS_FILE = os.path.join(BASE_DIR, "deployment_logs.txt")
+
+# Default remote folder suggested in the "Remote Directory" field
+DEFAULT_REMOTE_DIR = r"C:\Reminder_v2"
+
+# Max parallel SSH/SFTP workers when deploying to many stores at once
+MAX_WORKERS = 10
+
+# How many times to retry a single file upload before marking it failed
+UPLOAD_MAX_ATTEMPTS = 3
+UPLOAD_RETRY_DELAY_SEC = 1.5
+
+dashboard.py
+import os
+import queue
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
+from config import DEFAULT_REMOTE_DIR
+from data_store import load_stores
+from ui_utils import adjust_window_geometry
+from log_manager import append_full_log
+from log_history_window import show_log_history_window
+from store_editor_window import show_store_editor_window
+from file_options_dialog import show_file_options_dialog
+from deploy_worker import start_deployment
+
+
+class AlfaDeployDashboard:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AlfaDeploy — File Deployer")
+        adjust_window_geometry(self.root)
+        self.root.configure(bg="#f4f4f4")
+
+        self.stores = load_stores()
+        self.store_vars = {}
+        self.deploy_files = []  # list of {"path","name","run_as_admin","replace_if_exists"}
+        self.log_queue = queue.Queue()
+        self.failed_stores = []
+        self.success_stores = []
+
+        main_container = tk.Frame(self.root, bg="#f4f4f4")
+        main_container.pack(fill="both", expand=True, padx=10, pady=8)
+
+        top_row = tk.Frame(main_container, bg="#f4f4f4")
+        top_row.pack(fill="both", expand=False, pady=(0, 4))
+        top_row.grid_columnconfigure(0, weight=1)
+        top_row.grid_columnconfigure(1, weight=1)
+
+        self._build_files_panel(top_row)
+        self._build_commands_panel(top_row)
+
+        bottom_row = tk.Frame(main_container, bg="#f4f4f4")
+        bottom_row.pack(fill="both", expand=True, pady=(4, 0))
+        bottom_row.grid_columnconfigure(0, weight=1)
+        bottom_row.grid_columnconfigure(1, weight=1)
+        bottom_row.grid_rowconfigure(0, weight=1)
+
+        self._build_store_panel(bottom_row)
+        self._build_log_panel(bottom_row)
+
+        self.populate_store_checkboxes()
+
+    # ---------- Files To Deploy ----------
+    def _build_files_panel(self, parent):
+        frame = tk.LabelFrame(parent, text=" Files To Deploy ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
+        frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        btn_row = tk.Frame(frame, bg="#f4f4f4")
+        btn_row.pack(fill="x", pady=(0, 4))
+        tk.Button(btn_row, text="Choose File", font=("Segoe UI", 8, "bold"), bg="#007ACC", fg="white", command=self.choose_files).pack(side="left")
+        tk.Button(btn_row, text="Remove Selected", font=("Segoe UI", 8), command=self.remove_selected_file).pack(side="left", padx=4)
+        tk.Label(btn_row, text="(double-click a file for options)", font=("Segoe UI", 7, "italic"), fg="#777777", bg="#f4f4f4").pack(side="left", padx=6)
+
+        list_frame = tk.Frame(frame, bg="#f4f4f4")
+        list_frame.pack(fill="both", expand=True)
+
+        self.files_listbox = tk.Listbox(list_frame, font=("Consolas", 9), height=8, selectmode="extended")
+        files_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.files_listbox.yview)
+        self.files_listbox.configure(yscrollcommand=files_scroll.set)
+        self.files_listbox.pack(side="left", fill="both", expand=True)
+        files_scroll.pack(side="right", fill="y")
+        self.files_listbox.bind("<Double-Button-1>", self.open_file_options)
+
+    def choose_files(self):
+        paths = filedialog.askopenfilenames(title="Choose files to deploy")
+        for path in paths:
+            name = os.path.basename(path)
+            if any(f["path"] == path for f in self.deploy_files):
+                continue
+            self.deploy_files.append({
+                "path": path, "name": name,
+                "run_as_admin": False, "replace_if_exists": True
+            })
+        self.refresh_files_listbox()
+
+    def remove_selected_file(self):
+        selected = list(self.files_listbox.curselection())
+        for idx in reversed(selected):
+            del self.deploy_files[idx]
+        self.refresh_files_listbox()
+
+    def refresh_files_listbox(self):
+        self.files_listbox.delete(0, tk.END)
+        for f in self.deploy_files:
+            tags = []
+            if f.get("run_as_admin"):
+                tags.append("admin")
+            if not f.get("replace_if_exists", True):
+                tags.append("no-replace")
+            suffix = f"  [{', '.join(tags)}]" if tags else ""
+            self.files_listbox.insert(tk.END, f["name"] + suffix)
+
+    def open_file_options(self, event):
+        selected = self.files_listbox.curselection()
+        if not selected:
+            return
+        idx = selected[0]
+        show_file_options_dialog(self.root, self.deploy_files[idx])
+        self.refresh_files_listbox()
+
+    # ---------- Commands ----------
+    def _build_commands_panel(self, parent):
+        outer = tk.Frame(parent, bg="#f4f4f4")
+        outer.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+
+        cmd_frame = tk.LabelFrame(outer, text=" Commands ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
+        cmd_frame.pack(fill="x")
+
+        header_row = tk.Frame(cmd_frame, bg="#f4f4f4")
+        header_row.pack(fill="x")
+        self.run_after_deploy_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(header_row, text="Run After Deploy", variable=self.run_after_deploy_var, bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="right")
+
+        self.command_text = tk.Text(cmd_frame, height=4, font=("Consolas", 8))
+        self.command_text.pack(fill="x", pady=(4, 0))
+
+        dir_frame = tk.LabelFrame(outer, text=" Remote Directory ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
+        dir_frame.pack(fill="x", pady=(4, 0))
+        self.remote_dir_entry = tk.Entry(dir_frame, font=("Segoe UI", 9))
+        self.remote_dir_entry.insert(0, DEFAULT_REMOTE_DIR)
+        self.remote_dir_entry.pack(fill="x")
+
+    # ---------- Store List ----------
+    def _build_store_panel(self, parent):
+        frame = tk.LabelFrame(parent, text=" Store List ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=2)
+        frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        ctrl_row = tk.Frame(frame, bg="#f4f4f4")
+        ctrl_row.pack(fill="x", pady=(0, 2))
+        tk.Button(ctrl_row, text="Select All", font=("Segoe UI", 8), command=self.select_all_stores).pack(side="left", padx=2)
+        tk.Button(ctrl_row, text="Deselect All", font=("Segoe UI", 8), command=self.deselect_all_stores).pack(side="left", padx=2)
+        tk.Button(ctrl_row, text="🔄 Reload stores.txt", font=("Segoe UI", 8), command=self.reload_stores_list).pack(side="right", padx=2)
+        tk.Button(ctrl_row, text="📜 Logs History", font=("Segoe UI", 8), command=self.open_logs_history).pack(side="right", padx=2)
+        tk.Button(ctrl_row, text="✏️ Edit stores.txt", font=("Segoe UI", 8), command=self.open_store_editor).pack(side="right", padx=2)
+
+        list_container = tk.Frame(frame, bg="#f4f4f4")
+        list_container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(list_container, bg="#ffffff", highlightthickness=1, highlightbackground="#ccc")
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#ffffff")
+
+        self.store_canvas = canvas
+        self.store_canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def _on_scrollable_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(self.store_canvas_window, width=event.width)
+
+        scrollable_frame.bind("<Configure>", _on_scrollable_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.scrollable_frame = scrollable_frame
+
+        deploy_btn_frame = tk.Frame(frame, bg="#f4f4f4")
+        deploy_btn_frame.pack(fill="x", pady=(4, 0))
+        self.deploy_btn = tk.Button(
+            deploy_btn_frame, text="🚀 Deploy", font=("Segoe UI", 9, "bold"),
+            bg="#28A745", fg="white", pady=4, command=self.deploy
+        )
+        self.deploy_btn.pack(fill="x")
+
+    def populate_store_checkboxes(self):
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        self.store_vars.clear()
+
+        if not self.stores:
+            tk.Label(self.scrollable_frame, text="No stores found in stores.txt", bg="#ffffff", fg="red").pack(anchor="w", padx=5, pady=2)
+            return
+
+        grouped = {}
+        for s in self.stores:
+            grouped.setdefault(s.get("dc", "Ungrouped"), []).append(s)
+
+        for dc_name in sorted(grouped.keys()):
+            dc_stores = grouped[dc_name]
+
+            dc_header = tk.Frame(self.scrollable_frame, bg="#e9ecef")
+            dc_header.pack(fill="x", pady=(6, 2))
+
+            dc_var = tk.BooleanVar(value=True)
+
+            def make_toggle_dc(dc_stores=dc_stores, dc_var=dc_var):
+                def toggle_dc():
+                    new_val = dc_var.get()
+                    for s in dc_stores:
+                        self.store_vars[s["ip"]].set(new_val)
+                return toggle_dc
+
+            tk.Checkbutton(
+                dc_header, text=f"  {dc_name}  ({len(dc_stores)} store{'s' if len(dc_stores) != 1 else ''})",
+                variable=dc_var, bg="#e9ecef", activebackground="#e9ecef",
+                font=("Segoe UI", 8, "bold"), anchor="w", command=make_toggle_dc()
+            ).pack(fill="x", padx=2)
+
+            for s in dc_stores:
+                var = tk.BooleanVar(value=True)
+                ip = s["ip"]
+                self.store_vars[ip] = var
+                label_bits = [s.get("name") or ip]
+                if s.get("code"):
+                    label_bits.append(f"[{s['code']}]")
+                label_bits.append(f"({ip})")
+                tk.Checkbutton(
+                    self.scrollable_frame, text=" ".join(label_bits),
+                    variable=var, bg="#ffffff", activebackground="#ffffff", anchor="w"
+                ).pack(fill="x", anchor="w", padx=20, pady=1)
+
+        self.scrollable_frame.update_idletasks()
+        self.store_canvas.configure(scrollregion=self.store_canvas.bbox("all"))
+        self.store_canvas.yview_moveto(0)
+
+    def select_all_stores(self):
+        for var in self.store_vars.values():
+            var.set(True)
+
+    def deselect_all_stores(self):
+        for var in self.store_vars.values():
+            var.set(False)
+
+    def reload_stores_list(self):
+        self.stores = load_stores()
+        self.populate_store_checkboxes()
+        self.append_log("System: Reloaded stores.txt successfully.")
+
+    def open_logs_history(self):
+        show_log_history_window(self.root)
+
+    def open_store_editor(self):
+        show_store_editor_window(self.root, on_save=self.reload_stores_list)
+
+    def get_selected_stores(self):
+        return [s for s in self.stores if self.store_vars.get(s["ip"], tk.BooleanVar()).get()]
+
+    # ---------- Log Results ----------
+    def _build_log_panel(self, parent):
+        frame = tk.LabelFrame(parent, text=" Log Results ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=2)
+        frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+
+        progress_frame = tk.Frame(frame, bg="#f4f4f4")
+        progress_frame.pack(fill="x", pady=(0, 4))
+        self.status_label = tk.Label(progress_frame, text="Idle — ready to deploy", font=("Segoe UI", 8, "italic"), fg="#555555", bg="#f4f4f4")
+        self.status_label.pack(anchor="w")
+        self.progress = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate")
+        self.progress.pack(fill="x")
+
+        log_container = tk.Frame(frame, bg="#f4f4f4")
+        log_container.pack(fill="both", expand=True)
+        self.log_text = tk.Text(log_container, font=("Consolas", 8), wrap="word", state="disabled")
+        log_scroll = ttk.Scrollbar(log_container, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+        self.log_text.tag_configure("failed", foreground="#D9534F")
+
+    def append_log(self, text, tag=None):
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, text + "\n", tag) if tag else self.log_text.insert(tk.END, text + "\n")
+        self.log_text.config(state="disabled")
+        self.log_text.see(tk.END)
+
+    def log_both(self, text, tag=None):
+        self.append_log(text, tag)
+        append_full_log(text)
+
+    # ---------- Deploy ----------
+    def deploy(self):
+        selected_stores = self.get_selected_stores()
+        if not selected_stores:
+            messagebox.showwarning("Selection Error", "Please select at least one store PC to deploy to.")
+            return
+        if not self.deploy_files:
+            messagebox.showwarning("Files Error", "Add at least one file to the deploy list first.")
+            return
+
+        remote_dir = self.remote_dir_entry.get().strip() or DEFAULT_REMOTE_DIR
+        post_command = self.command_text.get("1.0", tk.END).strip()
+        run_after_deploy = self.run_after_deploy_var.get()
+
+        if not messagebox.askyesno(
+            "Confirm Deploy",
+            f"This will upload {len(self.deploy_files)} file(s) to {remote_dir} on {len(selected_stores)} store PC(s)."
+            + ("\nA post-deploy command will also run." if run_after_deploy and post_command else "")
+            + "\n\nProceed?"
+        ):
+            return
+
+        self.failed_stores = []
+        self.success_stores = []
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.config(state="disabled")
+        self.deploy_btn.config(state="disabled", text="⏳ Deploying...")
+        self.progress.config(mode="determinate", maximum=len(selected_stores), value=0)
+        self.status_label.config(text=f"Starting deployment to {len(selected_stores)} store(s)...")
+
+        self.log_both("\n==================================================")
+        self.log_both(f"--- STARTING DEPLOY TO {len(selected_stores)} STORE(S) ---")
+        self.log_both("==================================================")
+
+        start_deployment(selected_stores, self.deploy_files, remote_dir, post_command, run_after_deploy, self.log_queue)
+        self.root.after(100, self.poll_log_queue)
+
+    def poll_log_queue(self):
+        try:
+            while True:
+                kind, payload, tag = self.log_queue.get_nowait()
+                if kind == "log":
+                    self.log_both(payload, tag)
+                elif kind == "detail":
+                    append_full_log(payload)
+                elif kind == "status":
+                    self.status_label.config(text=payload)
+                elif kind == "progress":
+                    self.progress.step(payload)
+                elif kind == "failed_store":
+                    if payload not in self.failed_stores:
+                        self.failed_stores.append(payload)
+                elif kind == "success_store":
+                    if payload not in self.success_stores:
+                        self.success_stores.append(payload)
+                elif kind == "done":
+                    self.log_both("\n==================================================")
+                    self.log_both("--- DEPLOYMENT FINISHED ---")
+                    if self.success_stores:
+                        self.log_both(f"Stores completed successfully ({len(self.success_stores)}):")
+                        for s in self.success_stores:
+                            self.log_both(f"  ✓ {s}")
+                    if self.failed_stores:
+                        self.log_both(f"Stores with errors ({len(self.failed_stores)}):", tag="failed")
+                        for s in self.failed_stores:
+                            self.log_both(f"  ✗ {s}", tag="failed")
+                    if not self.success_stores and not self.failed_stores:
+                        self.log_both("No stores were processed.")
+                    self.log_both("==================================================\n")
+                    self.status_label.config(text="Deployment finished.")
+                    self.deploy_btn.config(state="normal", text="🚀 Deploy")
+                    messagebox.showinfo("Deploy Finished", "Deployment completed! Check results log below.")
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(100, self.poll_log_queue)
+
+data_store.py
+import os
+import ipaddress
+from config import STORES_FILE
+
+
+def load_stores():
+    """Parse stores.txt into a list of dicts:
+    {ip, user, pwd, dc, name, code, pos}
+
+    Format per line: ip,user,pwd,name,code,pos
+    A line with no comma is treated as a DC section header that groups
+    every store row that follows it, until the next header.
+    """
+    stores = []
+    if os.path.exists(STORES_FILE):
+        current_dc = "Ungrouped"
+        with open(STORES_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "," not in line:
+                    current_dc = line
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    ip, user, pwd = parts[0], parts[1], parts[2]
+                    try:
+                        ipaddress.ip_address(ip)
+                    except ValueError:
+                        continue  # not a real IP — skip stray example/legend rows
+                    name = parts[3] if len(parts) > 3 and parts[3] else ip
+                    code = parts[4] if len(parts) > 4 and parts[4] else ""
+                    pos = parts[5] if len(parts) > 5 and parts[5] else ""
+                    stores.append({
+                        "ip": ip, "user": user, "pwd": pwd,
+                        "dc": current_dc, "name": name, "code": code, "pos": pos
+                    })
+    return stores
+
+
+def read_stores_raw():
+    """Return the raw text content of stores.txt for editing, or an empty
+    string if the file doesn't exist yet."""
+    if os.path.exists(STORES_FILE):
+        try:
+            with open(STORES_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
+    return ""
+
+
+def write_stores_raw(content):
+    """Overwrite stores.txt with new raw text content from the editor."""
+    with open(STORES_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
+
+deploy_worker.py
+import time
+import threading
+import concurrent.futures
+from datetime import datetime
+
+from config import MAX_WORKERS, UPLOAD_MAX_ATTEMPTS, UPLOAD_RETRY_DELAY_SEC
+from ssh_utils import open_ssh_client, run_ssh_command_on_client, test_connection
+from sftp_utils import open_sftp, ensure_remote_dir, remote_file_exists, upload_file
+
+
+def _run_elevated_once(ssh, remote_exe_path, log, detail):
+    """Fire a remote .exe with an elevated (Highest) run level, without
+    needing an interactive UAC click, by wrapping it in a throwaway
+    scheduled task. Same idiom the reminder dashboard uses to install
+    scheduled tasks — here it's a create -> run -> delete one-shot."""
+    task_name = f"AlfaDeploy_Run_{int(time.time() * 1000)}"
+
+    create_cmd = (
+        f'schtasks /Create /TN "{task_name}" /TR "{remote_exe_path}" '
+        f'/SC ONCE /ST 00:00 /RL HIGHEST /F'
+    )
+    run_cmd = f'schtasks /Run /TN "{task_name}"'
+    delete_cmd = f'schtasks /Delete /TN "{task_name}" /F'
+
+    ok_c, out_c, err_c = run_ssh_command_on_client(ssh, create_cmd)
+    if not ok_c or "SUCCESS" not in out_c.upper():
+        log(f"FAILED to register elevated run task for {remote_exe_path}: {err_c.strip() or out_c.strip()}", tag="failed")
+        return False
+
+    ok_r, out_r, err_r = run_ssh_command_on_client(ssh, run_cmd)
+    if not ok_r:
+        log(f"FAILED to trigger elevated run for {remote_exe_path}: {err_r.strip()}", tag="failed")
+        run_ssh_command_on_client(ssh, delete_cmd)  # best-effort cleanup
+        return False
+
+    detail(f"Launched elevated: {remote_exe_path}")
+    run_ssh_command_on_client(ssh, delete_cmd)  # best-effort cleanup, ignore result
+    return True
+
+
+def _upload_one_file(sftp, file_entry, remote_dir, log, detail):
+    """Upload a single queued file, respecting replace_if_exists.
+    Returns (uploaded: bool, remote_path: str | None)."""
+    local_path = file_entry["path"]
+    name = file_entry["name"]
+    remote_dir_norm = remote_dir.replace("\\", "/").rstrip("/")
+    remote_path = f"{remote_dir_norm}/{name}"
+
+    if not file_entry.get("replace_if_exists", True) and remote_file_exists(sftp, remote_path):
+        detail(f"Skipped {name} — already exists remotely and replace is off.")
+        return False, remote_path
+
+    last_err = None
+    for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            upload_file(sftp, local_path, remote_dir, filename=name)
+            detail(f"Uploaded {name} -> {remote_path}")
+            return True, remote_path
+        except Exception as e:
+            last_err = e
+            if attempt < UPLOAD_MAX_ATTEMPTS:
+                time.sleep(UPLOAD_RETRY_DELAY_SEC)
+
+    log(f"FAILED to upload {name}: {last_err}", tag="failed")
+    return False, None
+
+
+def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+    ip, user, pwd = store["ip"], store["user"], store["pwd"]
+    store_code = store.get("code", "")
+    store_pos = store.get("pos", "")
+    label_parts = [p for p in [store_code, store_pos] if p]
+    store_label = f"{' - '.join(label_parts)} ({ip})" if label_parts else ip
+
+    def log(text, tag=None):
+        log_queue.put(("log", f"[STORE: {ip}] {text}", tag))
+
+    def detail(text):
+        log_queue.put(("detail", f"[STORE: {ip}] {text}", None))
+
+    log("Connecting...")
+    log_queue.put(("status", f"Connecting to {ip}...", None))
+
+    conn_ok, conn_err = test_connection(ip, user, pwd)
+    if not conn_ok:
+        if conn_err == "AUTH_FAILED":
+            log("FAILED — SSH authentication rejected.", tag="failed")
+        else:
+            log(f"FAILED — could not connect: {conn_err}", tag="failed")
+        log("SKIPPED — fix connectivity/credentials for this store and re-run.", tag="failed")
+        log_queue.put(("failed_store", store_label, None))
+        log_queue.put(("progress", 1, None))
+        return
+
+    try:
+        ssh = open_ssh_client(ip, user, pwd, timeout=8)
+    except Exception as e:
+        log(f"FAILED — could not open session for file transfer: {e}", tag="failed")
+        log_queue.put(("failed_store", store_label, None))
+        log_queue.put(("progress", 1, None))
+        return
+
+    log("Connected and authenticated successfully.")
+    uploaded_count = 0
+    total_files = len(deploy_files)
+    any_upload_failed = False
+
+    try:
+        sftp = open_sftp(ssh)
+        ensure_remote_dir(sftp, remote_dir)
+        detail(f"Target directory ready: {remote_dir}")
+
+        for i, file_entry in enumerate(deploy_files):
+            log_queue.put(("status", f"Uploading {file_entry['name']} to {ip} ({i + 1}/{total_files})...", None))
+            uploaded, remote_path = _upload_one_file(sftp, file_entry, remote_dir, log, detail)
+
+            if uploaded:
+                uploaded_count += 1
+                if file_entry.get("run_as_admin") and remote_path:
+                    _run_elevated_once(ssh, remote_path, log, detail)
+            elif remote_path is None:
+                any_upload_failed = True
+
+        sftp.close()
+
+        if run_after_deploy and post_command.strip():
+            log_queue.put(("status", f"Running post-deploy command on {ip}...", None))
+            ok_p, out_p, err_p = run_ssh_command_on_client(ssh, post_command.strip())
+            if ok_p:
+                detail(f"Post-deploy command ran. Output: {out_p.strip() or '(none)'}")
+            else:
+                log(f"FAILED to run post-deploy command: {err_p}", tag="failed")
+                any_upload_failed = True
+
+    except Exception as e:
+        log(f"FAILED during transfer: {e}", tag="failed")
+        any_upload_failed = True
+    finally:
+        ssh.close()
+
+    done_tag = "failed" if any_upload_failed else None
+    log(f"Completed: {uploaded_count}/{total_files} file(s) uploaded.", tag=done_tag)
+
+    if any_upload_failed or uploaded_count < total_files:
+        log_queue.put(("failed_store", store_label, None))
+    else:
+        log_queue.put(("success_store", store_label, None))
+    log_queue.put(("progress", 1, None))
+
+
+def start_deployment(selected_stores, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+    """Kick off the whole batch on a background thread so the Tk main
+    loop never blocks. Workers only ever push to log_queue — the caller
+    is expected to poll it on the main thread (see dashboard.py)."""
+
+    def deploy_worker(store):
+        _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue)
+
+    def run_all():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            list(executor.map(deploy_worker, selected_stores))
+        log_queue.put(("done", None, None))
+
+    threading.Thread(target=run_all, daemon=True).start()
+
+deployment_logs.txt
+[2026-09-11 09:20:40] 
+==================================================
+[2026-09-11 09:20:40] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 09:20:40] ==================================================
+[2026-09-11 09:20:40] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 09:20:41] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 09:20:41] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 09:20:41] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:20:41] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 09:20:41] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 09:20:41] 
+==================================================
+[2026-09-11 09:20:41] --- DEPLOYMENT FINISHED ---
+[2026-09-11 09:20:41] Stores completed successfully (1):
+[2026-09-11 09:20:41]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 09:20:41] ==================================================
+
+[2026-09-11 09:20:52] 
+==================================================
+[2026-09-11 09:20:52] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 09:20:52] ==================================================
+[2026-09-11 09:20:52] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 09:20:52] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 09:20:52] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 09:20:53] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:20:53] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:20:53] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 09:20:53] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 09:20:53] 
+==================================================
+[2026-09-11 09:20:53] --- DEPLOYMENT FINISHED ---
+[2026-09-11 09:20:53] Stores completed successfully (1):
+[2026-09-11 09:20:53]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 09:20:53] ==================================================
+
+[2026-09-11 09:21:00] 
+==================================================
+[2026-09-11 09:21:00] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 09:21:00] ==================================================
+[2026-09-11 09:21:00] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 09:21:00] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 09:21:00] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 09:21:01] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:21:01] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:21:01] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 09:21:01] [STORE: 127.0.0.1] Post-deploy command ran. Output: (none)
+[2026-09-11 09:21:01] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 09:21:01] 
+==================================================
+[2026-09-11 09:21:01] --- DEPLOYMENT FINISHED ---
+[2026-09-11 09:21:01] Stores completed successfully (1):
+[2026-09-11 09:21:01]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 09:21:01] ==================================================
+
+[2026-09-11 09:22:12] 
+==================================================
+[2026-09-11 09:22:12] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 09:22:12] ==================================================
+[2026-09-11 09:22:12] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 09:22:12] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 09:22:12] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 09:22:12] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:22:12] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 09:22:13] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 09:22:13] [STORE: 127.0.0.1] Post-deploy command ran. Output: (none)
+[2026-09-11 09:22:13] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 09:22:13] 
+==================================================
+[2026-09-11 09:22:13] --- DEPLOYMENT FINISHED ---
+[2026-09-11 09:22:13] Stores completed successfully (1):
+[2026-09-11 09:22:13]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 09:22:13] ==================================================
+
+
+file_options_dialog.py
+import tkinter as tk
+
+
+def show_file_options_dialog(parent_root, file_entry):
+    """Modal dialog for one queued file's per-file deploy options.
+    file_entry is a dict with at least {"name", "run_as_admin",
+    "replace_if_exists"} — this function edits it in place and blocks
+    until the dialog is closed."""
+    win = tk.Toplevel(parent_root)
+    win.title(file_entry["name"])
+    win.configure(bg="#FFFFFF")
+    win.resizable(False, False)
+    win.transient(parent_root)
+    win.grab_set()
+
+    window_width = 340
+    window_height = 220
+    center_x = int((win.winfo_screenwidth() / 2) - (window_width / 2))
+    center_y = int((win.winfo_screenheight() / 2) - (window_height / 2))
+    win.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
+
+    tk.Label(
+        win, text=file_entry["name"], font=("Segoe UI", 10, "bold"),
+        bg="#FFFFFF", wraplength=300
+    ).pack(pady=(14, 10))
+
+    admin_var = tk.BooleanVar(value=file_entry.get("run_as_admin", False))
+    replace_var = tk.BooleanVar(value=file_entry.get("replace_if_exists", True))
+
+    opts_frame = tk.Frame(win, bg="#FFFFFF")
+    opts_frame.pack(pady=4)
+
+    tk.Checkbutton(
+        opts_frame, text="Run as Administrator", variable=admin_var,
+        bg="#FFFFFF", anchor="w", font=("Segoe UI", 9)
+    ).pack(anchor="w", pady=3)
+
+    tk.Checkbutton(
+        opts_frame, text="Replace the old if already exist", variable=replace_var,
+        bg="#FFFFFF", anchor="w", font=("Segoe UI", 9)
+    ).pack(anchor="w", pady=3)
+
+    def do_ok():
+        file_entry["run_as_admin"] = admin_var.get()
+        file_entry["replace_if_exists"] = replace_var.get()
+        win.destroy()
+
+    tk.Button(
+        win, text="OK", font=("Segoe UI", 9, "bold"), bg="#28A745", fg="white",
+        padx=20, pady=3, bd=0, command=do_ok
+    ).pack(pady=(14, 10))
+
+    win.wait_window()
+
+log_history_window.py
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+from log_manager import read_full_log, clear_full_log
+
+
+def show_log_history_window(parent_root):
+    win = tk.Toplevel(parent_root)
+    win.title("Deployment Logs History")
+    win.configure(bg="#f4f4f4")
+
+    window_width = 720
+    window_height = 520
+    center_x = int((win.winfo_screenwidth() / 2) - (window_width / 2))
+    center_y = int((win.winfo_screenheight() / 2) - (window_height / 2))
+    win.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
+
+    top_frame = tk.Frame(win, bg="#f4f4f4")
+    top_frame.pack(fill="x", padx=8, pady=6)
+
+    tk.Label(top_frame, text="Full Detailed Deployment Logs", font=("Segoe UI", 9, "bold"), bg="#f4f4f4").pack(side="left")
+
+    text_frame = tk.Frame(win, bg="#f4f4f4")
+    text_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    log_text = tk.Text(text_frame, font=("Consolas", 8), wrap="word")
+    scroll = ttk.Scrollbar(text_frame, orient="vertical", command=log_text.yview)
+    log_text.configure(yscrollcommand=scroll.set)
+
+    log_text.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    def load_content():
+        log_text.config(state="normal")
+        log_text.delete("1.0", tk.END)
+        log_text.insert("1.0", read_full_log())
+        log_text.config(state="disabled")
+        log_text.see(tk.END)
+
+    def do_clear():
+        if messagebox.askyesno("Clear Log History", "This will permanently delete the saved log history file. Continue?"):
+            if clear_full_log():
+                load_content()
+            else:
+                messagebox.showerror("Error", "Could not clear the log file.")
+
+    tk.Button(top_frame, text="🗑️ Clear History", font=("Segoe UI", 8), bg="#D9534F", fg="white", command=do_clear).pack(side="right")
+
+    load_content()
+
+log_manager.py
+import os
+from datetime import datetime
+
+from config import LOGS_FILE
+
+
+def append_full_log(text):
+    """Append a timestamped line to the persistent detailed log file.
+    Best-effort — a logging hiccup should never interrupt a deployment."""
+    try:
+        with open(LOGS_FILE, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {text}\n")
+    except Exception:
+        pass
+
+
+def read_full_log():
+    if os.path.exists(LOGS_FILE):
+        try:
+            with open(LOGS_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            return content if content.strip() else "(No logs recorded yet.)"
+        except Exception:
+            return "(Could not read log file.)"
+    return "(No logs recorded yet.)"
+
+
+def clear_full_log():
+    try:
+        if os.path.exists(LOGS_FILE):
+            os.remove(LOGS_FILE)
+        return True
+    except Exception:
+        return False
+
+main.py
+import tkinter as tk
+
+from dashboard import AlfaDeployDashboard
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AlfaDeployDashboard(root)
+    root.mainloop()
+
+sftp_utils.py
+import posixpath
+
+
+def open_sftp(ssh):
+    """Return an SFTPClient bound to an already-connected SSHClient."""
+    return ssh.open_sftp()
+
+
+def remote_file_exists(sftp, remote_path):
+    try:
+        sftp.stat(remote_path)
+        return True
+    except FileNotFoundError:
+        return False
+    except IOError:
+        return False
+
+
+def ensure_remote_dir(sftp, remote_dir):
+    """Create remote_dir (and any missing parent folders) if it doesn't
+    exist yet. remote_dir should use backslashes (Windows) or forward
+    slashes; both are normalized to forward slashes for SFTP."""
+    normalized = remote_dir.replace("\\", "/")
+    parts = [p for p in normalized.split("/") if p]
+
+    # Rebuild path piece by piece (handles "C:" drive prefix correctly)
+    current = ""
+    for i, part in enumerate(parts):
+        current = part if i == 0 else current + "/" + part
+        try:
+            sftp.stat(current)
+        except IOError:
+            try:
+                sftp.mkdir(current)
+            except IOError:
+                pass  # race condition or drive root — safe to ignore
+
+
+def upload_file(sftp, local_path, remote_dir, filename=None):
+    """Upload a single local file into remote_dir. Returns the remote
+    path used."""
+    if filename is None:
+        filename = posixpath.basename(local_path.replace("\\", "/"))
+    remote_dir_norm = remote_dir.replace("\\", "/").rstrip("/")
+    remote_path = f"{remote_dir_norm}/{filename}"
+    sftp.put(local_path, remote_path)
+    return remote_path
+
+ssh_utils.py
+import socket
+import paramiko
+
+
+def open_ssh_client(ip, user, pwd, timeout=6):
+    """Open and return a connected SSHClient, or raise on failure.
+    Caller is responsible for closing it."""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(ip, username=user, password=pwd, timeout=timeout)
+    return ssh
+
+
+def run_ssh_command(ip, user, pwd, cmd):
+    """One-shot command execution: connect, run, disconnect.
+    Returns (ok, stdout_text, stderr_text)."""
+    try:
+        ssh = open_ssh_client(ip, user, pwd, timeout=5)
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        out = stdout.read().decode("utf-8", errors="ignore")
+        err = stderr.read().decode("utf-8", errors="ignore")
+        ssh.close()
+        return True, out, err
+    except Exception as e:
+        return False, "", str(e)
+
+
+def run_ssh_command_on_client(ssh, cmd):
+    """Run a command on an already-open SSHClient (no connect/close)."""
+    try:
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        out = stdout.read().decode("utf-8", errors="ignore")
+        err = stderr.read().decode("utf-8", errors="ignore")
+        return True, out, err
+    except Exception as e:
+        return False, "", str(e)
+
+
+def test_connection(ip, user, pwd):
+    """Validate reachability/credentials only. Returns (True, None) or
+    (False, error_code_string)."""
+    try:
+        ssh = open_ssh_client(ip, user, pwd, timeout=6)
+        ssh.close()
+        return True, None
+    except paramiko.AuthenticationException:
+        return False, "AUTH_FAILED"
+    except (paramiko.SSHException, socket.timeout, socket.error, OSError) as e:
+        return False, f"CONNECTION_ERROR: {e}"
+    except Exception as e:
+        return False, f"UNKNOWN_ERROR: {e}"
+
+store_editor_window.py
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+from data_store import read_stores_raw, write_stores_raw
+
+
+def show_store_editor_window(parent_root, on_save=None):
+    """Opens an editable view of stores.txt. If on_save is given, it's
+    called after a successful save so the caller can reload its store
+    list/checkboxes without needing to know how."""
+    win = tk.Toplevel(parent_root)
+    win.title("Edit stores.txt")
+    win.configure(bg="#f4f4f4")
+
+    window_width = 720
+    window_height = 520
+    center_x = int((win.winfo_screenwidth() / 2) - (window_width / 2))
+    center_y = int((win.winfo_screenheight() / 2) - (window_height / 2))
+    win.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
+
+    top_frame = tk.Frame(win, bg="#f4f4f4")
+    top_frame.pack(fill="x", padx=8, pady=6)
+
+    tk.Label(
+        top_frame, text="Editing stores.txt — DC section header, then ip,user,pwd,name,code,pos",
+        font=("Segoe UI", 8, "bold"), bg="#f4f4f4"
+    ).pack(side="left")
+
+    text_frame = tk.Frame(win, bg="#f4f4f4")
+    text_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    editor = tk.Text(text_frame, font=("Consolas", 9), wrap="none", undo=True)
+    v_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=editor.yview)
+    h_scroll = ttk.Scrollbar(text_frame, orient="horizontal", command=editor.xview)
+    editor.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+    editor.grid(row=0, column=0, sticky="nsew")
+    v_scroll.grid(row=0, column=1, sticky="ns")
+    h_scroll.grid(row=1, column=0, sticky="ew")
+    text_frame.grid_rowconfigure(0, weight=1)
+    text_frame.grid_columnconfigure(0, weight=1)
+
+    editor.insert("1.0", read_stores_raw())
+
+    btn_frame = tk.Frame(win, bg="#f4f4f4")
+    btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+    def do_save():
+        content = editor.get("1.0", tk.END)
+        if content.endswith("\n"):
+            content = content[:-1]
+        try:
+            write_stores_raw(content)
+        except Exception as e:
+            messagebox.showerror("Save Failed", f"Could not save stores.txt:\n{e}")
+            return
+        if on_save:
+            on_save()
+        messagebox.showinfo("Saved", "stores.txt updated and store list reloaded.")
+
+    def do_close():
+        win.destroy()
+
+    tk.Button(btn_frame, text="💾 Save", font=("Segoe UI", 9, "bold"), bg="#28A745", fg="white", padx=15, pady=3, command=do_save).pack(side="left", padx=2)
+    tk.Button(btn_frame, text="Close", font=("Segoe UI", 9), padx=15, pady=3, command=do_close).pack(side="left", padx=2)
+
+stores.txt
+DC Mexico
+127.0.0.1, server, atp, local, j3pc, server
+172.26.187.82, pos_1, pos_1, ATP SAN CARLOS SAN LUIS PMPGA, 3138, POS 1
+172.26.187.81, Server, atp, ATP SAN CARLOS SAN LUIS PMPGA, 3138, Server
+172.26.48.84, pos_1, pos_1xxx, ATP ATP STA MARIA STA ANA PAMPANGA, 3438, POS 1
+10.103.85.145, pos_1, pos_1, ATP DC MEXICO, 3368 POS 1
+ui_utils.py
+def adjust_window_geometry(root):
+    root.update_idletasks()
+
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+
+    target_width = min(1100, screen_width - 40)
+    target_height = min(760, screen_height - 80)
+
+    center_x = int((screen_width / 2) - (target_width / 2))
+    center_y = int((screen_height / 2) - (target_height / 2))
+
+    root.geometry(f"{target_width}x{target_height}+{center_x}+{center_y}")
+    root.minsize(900, 680)
+    root.resizable(True, True)
+

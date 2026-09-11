@@ -65,7 +65,39 @@ def _upload_one_file(sftp, file_entry, remote_dir, log, detail):
     return False, None
 
 
-def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+def _upload_all_files(sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail):
+    uploaded_count = 0
+    total_files = len(deploy_files)
+    any_upload_failed = False
+
+    for i, file_entry in enumerate(deploy_files):
+        log_queue.put(("status", f"Uploading {file_entry['name']} to {ip} ({i + 1}/{total_files})...", None))
+        uploaded, remote_path = _upload_one_file(sftp, file_entry, remote_dir, log, detail)
+
+        if uploaded:
+            uploaded_count += 1
+            if file_entry.get("run_as_admin") and remote_path:
+                _run_elevated_once(ssh, remote_path, log, detail)
+        elif remote_path is None:
+            any_upload_failed = True
+
+    return uploaded_count, total_files, any_upload_failed
+
+
+def _run_post_command(ssh, post_command, ip, log_queue, log, detail):
+    """Returns True if there was nothing to run, or it ran successfully."""
+    if not post_command.strip():
+        return True
+    log_queue.put(("status", f"Running command on {ip}...", None))
+    ok_p, out_p, err_p = run_ssh_command_on_client(ssh, post_command.strip())
+    if ok_p:
+        detail(f"Command ran. Output: {out_p.strip() or '(none)'}")
+        return True
+    log(f"FAILED to run command: {err_p}", tag="failed")
+    return False
+
+
+def _deploy_to_store(store, deploy_files, remote_dir, post_command, execution_order, log_queue):
     ip, user, pwd = store["ip"], store["user"], store["pwd"]
     store_code = store.get("code", "")
     store_pos = store.get("pos", "")
@@ -104,33 +136,25 @@ def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_de
     uploaded_count = 0
     total_files = len(deploy_files)
     any_upload_failed = False
+    command_failed = False
 
     try:
         sftp = open_sftp(ssh)
         ensure_remote_dir(sftp, remote_dir)
         detail(f"Target directory ready: {remote_dir}")
 
-        for i, file_entry in enumerate(deploy_files):
-            log_queue.put(("status", f"Uploading {file_entry['name']} to {ip} ({i + 1}/{total_files})...", None))
-            uploaded, remote_path = _upload_one_file(sftp, file_entry, remote_dir, log, detail)
-
-            if uploaded:
-                uploaded_count += 1
-                if file_entry.get("run_as_admin") and remote_path:
-                    _run_elevated_once(ssh, remote_path, log, detail)
-            elif remote_path is None:
-                any_upload_failed = True
+        if execution_order == "commands_first":
+            command_failed = not _run_post_command(ssh, post_command, ip, log_queue, log, detail)
+            uploaded_count, total_files, any_upload_failed = _upload_all_files(
+                sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail
+            )
+        else:  # files_first (default)
+            uploaded_count, total_files, any_upload_failed = _upload_all_files(
+                sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail
+            )
+            command_failed = not _run_post_command(ssh, post_command, ip, log_queue, log, detail)
 
         sftp.close()
-
-        if run_after_deploy and post_command.strip():
-            log_queue.put(("status", f"Running post-deploy command on {ip}...", None))
-            ok_p, out_p, err_p = run_ssh_command_on_client(ssh, post_command.strip())
-            if ok_p:
-                detail(f"Post-deploy command ran. Output: {out_p.strip() or '(none)'}")
-            else:
-                log(f"FAILED to run post-deploy command: {err_p}", tag="failed")
-                any_upload_failed = True
 
     except Exception as e:
         log(f"FAILED during transfer: {e}", tag="failed")
@@ -138,23 +162,23 @@ def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_de
     finally:
         ssh.close()
 
-    done_tag = "failed" if any_upload_failed else None
+    done_tag = "failed" if (any_upload_failed or command_failed) else None
     log(f"Completed: {uploaded_count}/{total_files} file(s) uploaded.", tag=done_tag)
 
-    if any_upload_failed or uploaded_count < total_files:
+    if any_upload_failed or command_failed or uploaded_count < total_files:
         log_queue.put(("failed_store", store_label, None))
     else:
         log_queue.put(("success_store", store_label, None))
     log_queue.put(("progress", 1, None))
 
 
-def start_deployment(selected_stores, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+def start_deployment(selected_stores, deploy_files, remote_dir, post_command, execution_order, log_queue):
     """Kick off the whole batch on a background thread so the Tk main
     loop never blocks. Workers only ever push to log_queue — the caller
     is expected to poll it on the main thread (see dashboard.py)."""
 
     def deploy_worker(store):
-        _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue)
+        _deploy_to_store(store, deploy_files, remote_dir, post_command, execution_order, log_queue)
 
     def run_all():
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

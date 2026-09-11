@@ -117,9 +117,15 @@ class AlfaDeployDashboard:
 
         header_row = tk.Frame(cmd_frame, bg="#f4f4f4")
         header_row.pack(fill="x")
-        self.run_after_deploy_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(header_row, text="Run After Deploy", variable=self.run_after_deploy_var, bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="right")
-
+        self.execution_order_var = tk.StringVar(value="files_first")
+        order_frame = tk.Frame(header_row, bg="#f4f4f4")
+        order_frame.pack(side="right")
+        tk.Label(order_frame, text="Order:", font=("Segoe UI", 8), bg="#f4f4f4").pack(side="left", padx=(0, 4))
+        tk.Radiobutton(order_frame, text="Files First", variable=self.execution_order_var,
+                       value="files_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
+        tk.Radiobutton(order_frame, text="Commands First", variable=self.execution_order_var,
+                       value="commands_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
+        
         self.command_text = tk.Text(cmd_frame, height=4, font=("Consolas", 8))
         self.command_text.pack(fill="x", pady=(4, 0))
 
@@ -290,12 +296,20 @@ class AlfaDeployDashboard:
 
         remote_dir = self.remote_dir_entry.get().strip() or DEFAULT_REMOTE_DIR
         post_command = self.command_text.get("1.0", tk.END).strip()
-        run_after_deploy = self.run_after_deploy_var.get()
+        execution_order = self.execution_order_var.get()
+
+        order_note = ""
+        if post_command:
+            order_note = (
+                "\nOrder: files will upload first, then the command runs."
+                if execution_order == "files_first"
+                else "\nOrder: the command runs first, then files upload."
+            )
 
         if not messagebox.askyesno(
             "Confirm Deploy",
             f"This will upload {len(self.deploy_files)} file(s) to {remote_dir} on {len(selected_stores)} store PC(s)."
-            + ("\nA post-deploy command will also run." if run_after_deploy and post_command else "")
+            + order_note
             + "\n\nProceed?"
         ):
             return
@@ -313,7 +327,7 @@ class AlfaDeployDashboard:
         self.log_both(f"--- STARTING DEPLOY TO {len(selected_stores)} STORE(S) ---")
         self.log_both("==================================================")
 
-        start_deployment(selected_stores, self.deploy_files, remote_dir, post_command, run_after_deploy, self.log_queue)
+        start_deployment(selected_stores, self.deploy_files, remote_dir, post_command, execution_order, self.log_queue)
         self.root.after(100, self.poll_log_queue)
 
     def poll_log_queue(self):
