@@ -109,3 +109,60 @@
 [2026-09-11 11:36:48]   ✓ j3pc - server (127.0.0.1)
 [2026-09-11 11:36:48] ==================================================
 
+[2026-09-11 11:58:05] 
+==================================================
+[2026-09-11 11:58:05] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 11:58:05] ==================================================
+[2026-09-11 11:58:05] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 11:58:06] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 11:58:06] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 11:58:06] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:58:30] [STORE: 127.0.0.1] Launched elevated and confirmed finished: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:58:30] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 11:58:31] [STORE: 127.0.0.1] Command ran. Output: (none)
+[2026-09-11 11:58:31] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 11:58:31] 
+==================================================
+[2026-09-11 11:58:31] --- DEPLOYMENT FINISHED ---
+[2026-09-11 11:58:31] Stores completed successfully (1):
+[2026-09-11 11:58:31]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 11:58:31] ==================================================
+
+[2026-09-11 11:58:39] 
+==================================================
+[2026-09-11 11:58:39] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 11:58:39] ==================================================
+[2026-09-11 11:58:39] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 11:58:39] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 11:58:39] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 11:58:39] [STORE: 127.0.0.1] Command ran. Output: (none)
+[2026-09-11 11:58:39] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:59:08] [STORE: 127.0.0.1] Launched elevated and confirmed finished: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:59:09] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 11:59:09] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 11:59:09] 
+==================================================
+[2026-09-11 11:59:09] --- DEPLOYMENT FINISHED ---
+[2026-09-11 11:59:09] Stores completed successfully (1):
+[2026-09-11 11:59:09]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 11:59:09] ==================================================
+
+[2026-09-11 11:59:14] 
+==================================================
+[2026-09-11 11:59:14] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 11:59:14] ==================================================
+[2026-09-11 11:59:14] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 11:59:15] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 11:59:15] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 11:59:15] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:59:18] [STORE: 127.0.0.1] Launched elevated and confirmed finished: C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 11:59:19] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 11:59:19] [STORE: 127.0.0.1] Command ran. Output: (none)
+[2026-09-11 11:59:19] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 11:59:19] 
+==================================================
+[2026-09-11 11:59:19] --- DEPLOYMENT FINISHED ---
+[2026-09-11 11:59:19] Stores completed successfully (1):
+[2026-09-11 11:59:19]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 11:59:19] ==================================================
+

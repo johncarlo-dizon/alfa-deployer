@@ -1,0 +1,6 @@
+DC Mexico
+127.0.0.1, server, atp, local, j3pc, server
+172.26.187.82, pos_1, pos_1, ATP SAN CARLOS SAN LUIS PMPGA, 3138, POS 1
+172.26.187.81, Server, atp, ATP SAN CARLOS SAN LUIS PMPGA, 3138, Server
+172.26.48.84, pos_1, pos_1xxx, ATP ATP STA MARIA STA ANA PAMPANGA, 3438, POS 1
+10.103.85.145, pos_1, pos_1, ATP DC MEXICO, 3368 POS 1

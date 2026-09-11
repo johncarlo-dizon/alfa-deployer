@@ -1,0 +1,39 @@
+[2026-09-11 12:07:58] 
+==================================================
+[2026-09-11 12:07:58] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 12:07:58] ==================================================
+[2026-09-11 12:07:58] [STORE: 127.0.0.1] Connecting...
+[2026-09-11 12:07:58] [STORE: 127.0.0.1] Connected and authenticated successfully.
+[2026-09-11 12:07:59] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
+[2026-09-11 12:07:59] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 12:08:31] [STORE: 127.0.0.1] Timed out after 30s waiting for elevated task AlfaDeploy_Run_1789099679203 to finish.
+[2026-09-11 12:08:31] [STORE: 127.0.0.1] Launched elevated (did not confirm completion in time): C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 12:08:31] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
+[2026-09-11 12:08:31] [STORE: 127.0.0.1] Command ran. Output: (none)
+[2026-09-11 12:08:31] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
+[2026-09-11 12:08:31] 
+==================================================
+[2026-09-11 12:08:31] --- DEPLOYMENT FINISHED ---
+[2026-09-11 12:08:31] Stores completed successfully (1):
+[2026-09-11 12:08:31]   ✓ j3pc - server (127.0.0.1)
+[2026-09-11 12:08:31] ==================================================
+
+[2026-09-11 12:09:45] 
+==================================================
+[2026-09-11 12:09:45] --- STARTING DEPLOY TO 1 STORE(S) ---
+[2026-09-11 12:09:45] ==================================================
+[2026-09-11 12:09:45] [STORE: 172.26.187.82] Connecting...
+[2026-09-11 12:09:48] [STORE: 172.26.187.82] Connected and authenticated successfully.
+[2026-09-11 12:09:49] [STORE: 172.26.187.82] Target directory ready: C:\Reminder_v2
+[2026-09-11 12:09:49] [STORE: 172.26.187.82] Command ran. Output: (none)
+[2026-09-11 12:10:03] [STORE: 172.26.187.82] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 12:10:48] [STORE: 172.26.187.82] Timed out after 30s waiting for elevated task AlfaDeploy_Run_1789099803224 to finish.
+[2026-09-11 12:10:48] [STORE: 172.26.187.82] Launched elevated (did not confirm completion in time): C:/Reminder_v2/Alfamart_Reminder.exe
+[2026-09-11 12:10:49] [STORE: 172.26.187.82] Completed: 1/1 file(s) uploaded.
+[2026-09-11 12:10:49] 
+==================================================
+[2026-09-11 12:10:49] --- DEPLOYMENT FINISHED ---
+[2026-09-11 12:10:49] Stores completed successfully (1):
+[2026-09-11 12:10:49]   ✓ 3138 - POS 1 (172.26.187.82)
+[2026-09-11 12:10:49] ==================================================
+

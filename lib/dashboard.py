@@ -13,12 +13,63 @@ from file_options_dialog import show_file_options_dialog
 from deploy_worker import start_deployment
 
 
+# ---------------------------------------------------------------------------
+# Theme constants (UI only — no functional meaning) — dark theme
+# ---------------------------------------------------------------------------
+COLOR_BG = "#14161f"              # app background
+COLOR_PANEL = "#1c1f2b"           # card/body background
+COLOR_PANEL_ALT = "#11131b"       # header strip / secondary surfaces (darker than body)
+COLOR_PANEL_ALT_TEXT = "#c9cde0"  # text on the header strip / secondary surfaces
+COLOR_FIELD = "#242838"           # inputs (listbox/text/entry) — slightly lighter than panel
+COLOR_BORDER = "#2e3346"
+COLOR_TEXT = "#e7e9f5"
+COLOR_TEXT_MUTED = "#8b90a8"
+COLOR_ACCENT = "#9b6bff"          # violet accent
+COLOR_ACCENT_DARK = "#7f4ff2"
+COLOR_SUCCESS = "#2fbf6d"
+COLOR_SUCCESS_DARK = "#239c58"
+COLOR_DANGER = "#f0546a"
+COLOR_WARNING = "#e0a53d"
+
+FONT_BASE = ("Segoe UI", 8)
+FONT_BASE_BOLD = ("Segoe UI", 8, "bold")
+FONT_HEADER = ("Segoe UI Semibold", 8, "bold")
+FONT_SMALL = ("Segoe UI", 7)
+FONT_SMALL_BOLD = ("Segoe UI", 7, "bold")
+FONT_SMALL_ITALIC = ("Segoe UI", 7, "italic")
+FONT_MONO = ("Consolas", 8)
+FONT_MONO_SMALL = ("Consolas", 7)
+
+# Compact spacing scale used throughout (kept in one place so density is easy to tune)
+PAD_OUTER = 8
+PAD_PANEL_X = 6
+PAD_PANEL_Y = 4
+PAD_ROW = 3
+
+
+def _style_button(btn, bg, fg="white", hover=None, active=None):
+    """Give a tk.Button flat, modern styling with a hover effect."""
+    hover = hover or bg
+    active = active or bg
+    btn.configure(
+        bg=bg, fg=fg, activebackground=active, activeforeground=fg,
+        relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
+        highlightthickness=0,
+    )
+    btn.bind("<Enter>", lambda e: btn.configure(bg=hover))
+    btn.bind("<Leave>", lambda e: btn.configure(bg=bg))
+    return btn
+
+
 class AlfaDeployDashboard:
     def __init__(self, root):
         self.root = root
         self.root.title("AlfaDeploy — File Deployer")
         adjust_window_geometry(self.root)
-        self.root.configure(bg="#f4f4f4")
+        self._compact_window_height()
+        self.root.configure(bg=COLOR_BG)
+
+        self._init_ttk_style()
 
         self.stores = load_stores()
         self.store_vars = {}
@@ -27,19 +78,19 @@ class AlfaDeployDashboard:
         self.failed_stores = []
         self.success_stores = []
 
-        main_container = tk.Frame(self.root, bg="#f4f4f4")
-        main_container.pack(fill="both", expand=True, padx=10, pady=8)
+        main_container = tk.Frame(self.root, bg=COLOR_BG)
+        main_container.pack(fill="both", expand=True, padx=PAD_OUTER, pady=6)
 
-        top_row = tk.Frame(main_container, bg="#f4f4f4")
-        top_row.pack(fill="both", expand=False, pady=(0, 4))
+        top_row = tk.Frame(main_container, bg=COLOR_BG)
+        top_row.pack(fill="both", expand=False, pady=(0, 5))
         top_row.grid_columnconfigure(0, weight=1)
         top_row.grid_columnconfigure(1, weight=1)
 
         self._build_files_panel(top_row)
         self._build_commands_panel(top_row)
 
-        bottom_row = tk.Frame(main_container, bg="#f4f4f4")
-        bottom_row.pack(fill="both", expand=True, pady=(4, 0))
+        bottom_row = tk.Frame(main_container, bg=COLOR_BG)
+        bottom_row.pack(fill="both", expand=True, pady=(5, 0))
         bottom_row.grid_columnconfigure(0, weight=1)
         bottom_row.grid_columnconfigure(1, weight=1)
         bottom_row.grid_rowconfigure(0, weight=1)
@@ -49,24 +100,96 @@ class AlfaDeployDashboard:
 
         self.populate_store_checkboxes()
 
+    # ---------- Window sizing (UI only) ----------
+    def _compact_window_height(self):
+        """Shrinks the height that adjust_window_geometry set, keeping width/position.
+        Purely cosmetic — does not change adjust_window_geometry's own behavior."""
+        self.root.update_idletasks()
+        try:
+            geo = self.root.geometry()  # "WxH+X+Y"
+            size_part, sep, pos_part = geo.partition("+")
+            width_str, height_str = size_part.split("x")
+            width, height = int(width_str), int(height_str)
+            compact_height = max(540, int(height * 0.72))
+            new_geo = f"{width}x{compact_height}+{pos_part}" if pos_part else f"{width}x{compact_height}"
+            self.root.geometry(new_geo)
+            self.root.minsize(width, min(540, compact_height))
+        except Exception:
+            pass
+
+    # ---------- ttk theming ----------
+    def _init_ttk_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        for orient in ("Vertical", "Horizontal"):
+            style.configure(
+                f"{orient}.TScrollbar",
+                background=COLOR_FIELD, troughcolor=COLOR_PANEL_ALT,
+                bordercolor=COLOR_PANEL_ALT, arrowcolor=COLOR_TEXT_MUTED,
+                relief="flat", borderwidth=0, gripcount=0,
+            )
+            style.map(
+                f"{orient}.TScrollbar",
+                background=[("active", COLOR_ACCENT), ("pressed", COLOR_ACCENT)],
+                arrowcolor=[("active", COLOR_TEXT)],
+            )
+        style.configure("Horizontal.TProgressbar", troughcolor=COLOR_FIELD,
+                         background=COLOR_ACCENT, bordercolor=COLOR_FIELD,
+                         lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT, thickness=8)
+
+    def _panel(self, parent, title):
+        """A card-style LabelFrame replacement with a compact dark header strip."""
+        outer = tk.Frame(parent, bg=COLOR_BORDER, bd=0)
+        inner = tk.Frame(outer, bg=COLOR_PANEL)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        header = tk.Frame(inner, bg=COLOR_PANEL_ALT)
+        header.pack(fill="x")
+        accent_strip = tk.Frame(header, bg=COLOR_ACCENT, width=3)
+        accent_strip.pack(side="left", fill="y")
+        tk.Label(header, text=title.strip().upper(), font=FONT_HEADER, bg=COLOR_PANEL_ALT,
+                 fg=COLOR_PANEL_ALT_TEXT, anchor="w", padx=8, pady=3).pack(side="left", fill="x")
+
+        body = tk.Frame(inner, bg=COLOR_PANEL, padx=PAD_PANEL_X, pady=PAD_PANEL_Y)
+        body.pack(fill="both", expand=True)
+        return outer, body
+
     # ---------- Files To Deploy ----------
     def _build_files_panel(self, parent):
-        frame = tk.LabelFrame(parent, text=" Files To Deploy ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
-        frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        outer, body = self._panel(parent, "Files To Deploy")
+        outer.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
-        btn_row = tk.Frame(frame, bg="#f4f4f4")
-        btn_row.pack(fill="x", pady=(0, 4))
-        tk.Button(btn_row, text="Choose File", font=("Segoe UI", 8, "bold"), bg="#007ACC", fg="white", command=self.choose_files).pack(side="left")
-        tk.Button(btn_row, text="Remove Selected", font=("Segoe UI", 8), command=self.remove_selected_file).pack(side="left", padx=4)
-        tk.Label(btn_row, text="(double-click a file for options)", font=("Segoe UI", 7, "italic"), fg="#777777", bg="#f4f4f4").pack(side="left", padx=6)
+        btn_row = tk.Frame(body, bg=COLOR_PANEL)
+        btn_row.pack(fill="x", pady=(0, PAD_ROW))
+        choose_btn = tk.Button(btn_row, text="＋ Choose File", font=FONT_SMALL_BOLD, command=self.choose_files)
+        _style_button(choose_btn, COLOR_ACCENT, hover=COLOR_ACCENT_DARK)
+        choose_btn.configure(padx=8, pady=2)
+        choose_btn.pack(side="left")
 
-        list_frame = tk.Frame(frame, bg="#f4f4f4")
+        remove_btn = tk.Button(btn_row, text="Remove Selected", font=FONT_SMALL, command=self.remove_selected_file)
+        _style_button(remove_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        remove_btn.configure(padx=8, pady=2)
+        remove_btn.pack(side="left", padx=4)
+
+        tk.Label(btn_row, text="(double-click a file for options)", font=FONT_SMALL_ITALIC,
+                 fg=COLOR_TEXT_MUTED, bg=COLOR_PANEL).pack(side="left", padx=4)
+
+        list_frame = tk.Frame(body, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER)
         list_frame.pack(fill="both", expand=True)
 
-        self.files_listbox = tk.Listbox(list_frame, font=("Consolas", 9), height=8, selectmode="extended")
+        self.files_listbox = tk.Listbox(
+            list_frame, font=FONT_MONO, height=4, selectmode="extended",
+            bg=COLOR_FIELD, fg=COLOR_TEXT, relief="flat", bd=0,
+            highlightthickness=0, selectbackground=COLOR_ACCENT, selectforeground="white",
+            activestyle="none",
+        )
         files_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.files_listbox.yview)
         self.files_listbox.configure(yscrollcommand=files_scroll.set)
-        self.files_listbox.pack(side="left", fill="both", expand=True)
+        self.files_listbox.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=3)
         files_scroll.pack(side="right", fill="y")
         self.files_listbox.bind("<Double-Button-1>", self.open_file_options)
 
@@ -109,51 +232,80 @@ class AlfaDeployDashboard:
 
     # ---------- Commands ----------
     def _build_commands_panel(self, parent):
-        outer = tk.Frame(parent, bg="#f4f4f4")
-        outer.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        outer_wrap = tk.Frame(parent, bg=COLOR_BG)
+        outer_wrap.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-        cmd_frame = tk.LabelFrame(outer, text=" Commands ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
-        cmd_frame.pack(fill="x")
+        cmd_outer, cmd_body = self._panel(outer_wrap, "Commands")
+        cmd_outer.pack(fill="x")
 
-        header_row = tk.Frame(cmd_frame, bg="#f4f4f4")
+        header_row = tk.Frame(cmd_body, bg=COLOR_PANEL)
         header_row.pack(fill="x")
         self.execution_order_var = tk.StringVar(value="files_first")
-        order_frame = tk.Frame(header_row, bg="#f4f4f4")
+        order_frame = tk.Frame(header_row, bg=COLOR_PANEL)
         order_frame.pack(side="right")
-        tk.Label(order_frame, text="Order:", font=("Segoe UI", 8), bg="#f4f4f4").pack(side="left", padx=(0, 4))
+        tk.Label(order_frame, text="Order:", font=FONT_SMALL, bg=COLOR_PANEL, fg=COLOR_TEXT_MUTED).pack(side="left", padx=(0, 4))
         tk.Radiobutton(order_frame, text="Files First", variable=self.execution_order_var,
-                       value="files_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
+                       value="files_first", bg=COLOR_PANEL, fg=COLOR_TEXT, font=FONT_SMALL,
+                       selectcolor=COLOR_PANEL, activebackground=COLOR_PANEL).pack(side="left")
         tk.Radiobutton(order_frame, text="Commands First", variable=self.execution_order_var,
-                       value="commands_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
-        
-        self.command_text = tk.Text(cmd_frame, height=4, font=("Consolas", 8))
-        self.command_text.pack(fill="x", pady=(4, 0))
+                       value="commands_first", bg=COLOR_PANEL, fg=COLOR_TEXT, font=FONT_SMALL,
+                       selectcolor=COLOR_PANEL, activebackground=COLOR_PANEL).pack(side="left", padx=(4, 0))
 
-        dir_frame = tk.LabelFrame(outer, text=" Remote Directory ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=4)
-        dir_frame.pack(fill="x", pady=(4, 0))
-        self.remote_dir_entry = tk.Entry(dir_frame, font=("Segoe UI", 9))
+        text_wrap = tk.Frame(cmd_body, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        text_wrap.pack(fill="x", pady=(3, 0))
+        self.command_text = tk.Text(text_wrap, height=2, font=FONT_MONO_SMALL, bg=COLOR_FIELD,
+                                     fg=COLOR_TEXT, relief="flat", bd=0, highlightthickness=0,
+                                     insertbackground=COLOR_TEXT, padx=4, pady=3)
+        self.command_text.pack(fill="x")
+
+        dir_outer, dir_body = self._panel(outer_wrap, "Remote Directory")
+        dir_outer.pack(fill="x", pady=(4, 0))
+        entry_wrap = tk.Frame(dir_body, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        entry_wrap.pack(fill="x")
+        self.remote_dir_entry = tk.Entry(entry_wrap, font=FONT_BASE, bg=COLOR_FIELD, fg=COLOR_TEXT,
+                                          relief="flat", bd=0, insertbackground=COLOR_TEXT)
         self.remote_dir_entry.insert(0, DEFAULT_REMOTE_DIR)
-        self.remote_dir_entry.pack(fill="x")
+        self.remote_dir_entry.pack(fill="x", ipady=2, padx=4)
 
     # ---------- Store List ----------
     def _build_store_panel(self, parent):
-        frame = tk.LabelFrame(parent, text=" Store List ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=2)
-        frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        outer, body = self._panel(parent, "Store List")
+        outer.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
-        ctrl_row = tk.Frame(frame, bg="#f4f4f4")
-        ctrl_row.pack(fill="x", pady=(0, 2))
-        tk.Button(ctrl_row, text="Select All", font=("Segoe UI", 8), command=self.select_all_stores).pack(side="left", padx=2)
-        tk.Button(ctrl_row, text="Deselect All", font=("Segoe UI", 8), command=self.deselect_all_stores).pack(side="left", padx=2)
-        tk.Button(ctrl_row, text="🔄 Reload stores.txt", font=("Segoe UI", 8), command=self.reload_stores_list).pack(side="right", padx=2)
-        tk.Button(ctrl_row, text="📜 Logs History", font=("Segoe UI", 8), command=self.open_logs_history).pack(side="right", padx=2)
-        tk.Button(ctrl_row, text="✏️ Edit stores.txt", font=("Segoe UI", 8), command=self.open_store_editor).pack(side="right", padx=2)
+        ctrl_row = tk.Frame(body, bg=COLOR_PANEL)
+        ctrl_row.pack(fill="x", pady=(0, PAD_ROW))
 
-        list_container = tk.Frame(frame, bg="#f4f4f4")
+        select_btn = tk.Button(ctrl_row, text="Select All", font=FONT_SMALL, command=self.select_all_stores)
+        _style_button(select_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        select_btn.configure(padx=6, pady=1)
+        select_btn.pack(side="left", padx=(0, 3))
+
+        deselect_btn = tk.Button(ctrl_row, text="Deselect All", font=FONT_SMALL, command=self.deselect_all_stores)
+        _style_button(deselect_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        deselect_btn.configure(padx=6, pady=1)
+        deselect_btn.pack(side="left", padx=3)
+
+        reload_btn = tk.Button(ctrl_row, text="🔄 Reload", font=FONT_SMALL, command=self.reload_stores_list)
+        _style_button(reload_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        reload_btn.configure(padx=6, pady=1)
+        reload_btn.pack(side="right", padx=2)
+
+        logs_btn = tk.Button(ctrl_row, text="📜 Logs", font=FONT_SMALL, command=self.open_logs_history)
+        _style_button(logs_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        logs_btn.configure(padx=6, pady=1)
+        logs_btn.pack(side="right", padx=2)
+
+        edit_btn = tk.Button(ctrl_row, text="✏️ Edit", font=FONT_SMALL, command=self.open_store_editor)
+        _style_button(edit_btn, COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, hover="#323b54")
+        edit_btn.configure(padx=6, pady=1)
+        edit_btn.pack(side="right", padx=2)
+
+        list_container = tk.Frame(body, bg=COLOR_PANEL)
         list_container.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(list_container, bg="#ffffff", highlightthickness=1, highlightbackground="#ccc")
+        canvas = tk.Canvas(list_container, bg=COLOR_FIELD, highlightthickness=1, highlightbackground=COLOR_BORDER)
         scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg="#ffffff")
+        scrollable_frame = tk.Frame(canvas, bg=COLOR_FIELD)
 
         self.store_canvas = canvas
         self.store_canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -172,12 +324,14 @@ class AlfaDeployDashboard:
         scrollbar.pack(side="right", fill="y")
         self.scrollable_frame = scrollable_frame
 
-        deploy_btn_frame = tk.Frame(frame, bg="#f4f4f4")
-        deploy_btn_frame.pack(fill="x", pady=(4, 0))
+        deploy_btn_frame = tk.Frame(body, bg=COLOR_PANEL)
+        deploy_btn_frame.pack(fill="x", pady=(5, 0))
         self.deploy_btn = tk.Button(
             deploy_btn_frame, text="🚀 Deploy", font=("Segoe UI", 9, "bold"),
-            bg="#28A745", fg="white", pady=4, command=self.deploy
+            command=self.deploy
         )
+        _style_button(self.deploy_btn, COLOR_SUCCESS, hover=COLOR_SUCCESS_DARK)
+        self.deploy_btn.configure(pady=4)
         self.deploy_btn.pack(fill="x")
 
     def populate_store_checkboxes(self):
@@ -186,7 +340,8 @@ class AlfaDeployDashboard:
         self.store_vars.clear()
 
         if not self.stores:
-            tk.Label(self.scrollable_frame, text="No stores found in stores.txt", bg="#ffffff", fg="red").pack(anchor="w", padx=5, pady=2)
+            tk.Label(self.scrollable_frame, text="No stores found in stores.txt", bg=COLOR_FIELD,
+                     fg=COLOR_DANGER, font=FONT_BASE).pack(anchor="w", padx=8, pady=6)
             return
 
         grouped = {}
@@ -196,8 +351,8 @@ class AlfaDeployDashboard:
         for dc_name in sorted(grouped.keys()):
             dc_stores = grouped[dc_name]
 
-            dc_header = tk.Frame(self.scrollable_frame, bg="#e9ecef")
-            dc_header.pack(fill="x", pady=(6, 2))
+            dc_header = tk.Frame(self.scrollable_frame, bg=COLOR_PANEL_ALT)
+            dc_header.pack(fill="x", pady=(3, 1))
 
             dc_var = tk.BooleanVar(value=True)
 
@@ -210,9 +365,10 @@ class AlfaDeployDashboard:
 
             tk.Checkbutton(
                 dc_header, text=f"  {dc_name}  ({len(dc_stores)} store{'s' if len(dc_stores) != 1 else ''})",
-                variable=dc_var, bg="#e9ecef", activebackground="#e9ecef",
-                font=("Segoe UI", 8, "bold"), anchor="w", command=make_toggle_dc()
-            ).pack(fill="x", padx=2)
+                variable=dc_var, bg=COLOR_PANEL_ALT, fg=COLOR_PANEL_ALT_TEXT, activebackground=COLOR_PANEL_ALT,
+                selectcolor=COLOR_PANEL_ALT, font=FONT_SMALL_BOLD, anchor="w", command=make_toggle_dc(),
+                relief="flat", bd=0, padx=2, pady=1
+            ).pack(fill="x", padx=1)
 
             for s in dc_stores:
                 var = tk.BooleanVar(value=True)
@@ -224,8 +380,10 @@ class AlfaDeployDashboard:
                 label_bits.append(f"({ip})")
                 tk.Checkbutton(
                     self.scrollable_frame, text=" ".join(label_bits),
-                    variable=var, bg="#ffffff", activebackground="#ffffff", anchor="w"
-                ).pack(fill="x", anchor="w", padx=20, pady=1)
+                    variable=var, bg=COLOR_FIELD, fg=COLOR_TEXT, activebackground=COLOR_FIELD,
+                    selectcolor=COLOR_PANEL_ALT, anchor="w", font=FONT_BASE, relief="flat", bd=0,
+                    padx=0, pady=0
+                ).pack(fill="x", anchor="w", padx=18, pady=0)
 
         self.scrollable_frame.update_idletasks()
         self.store_canvas.configure(scrollregion=self.store_canvas.bbox("all"))
@@ -255,24 +413,28 @@ class AlfaDeployDashboard:
 
     # ---------- Log Results ----------
     def _build_log_panel(self, parent):
-        frame = tk.LabelFrame(parent, text=" Log Results ", font=("Segoe UI", 9, "bold"), bg="#f4f4f4", padx=8, pady=2)
-        frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        outer, body = self._panel(parent, "Log Results")
+        outer.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-        progress_frame = tk.Frame(frame, bg="#f4f4f4")
-        progress_frame.pack(fill="x", pady=(0, 4))
-        self.status_label = tk.Label(progress_frame, text="Idle — ready to deploy", font=("Segoe UI", 8, "italic"), fg="#555555", bg="#f4f4f4")
-        self.status_label.pack(anchor="w")
-        self.progress = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate")
+        progress_frame = tk.Frame(body, bg=COLOR_PANEL)
+        progress_frame.pack(fill="x", pady=(0, PAD_ROW))
+        self.status_label = tk.Label(progress_frame, text="Idle — ready to deploy", font=FONT_SMALL_ITALIC,
+                                      fg=COLOR_TEXT_MUTED, bg=COLOR_PANEL)
+        self.status_label.pack(anchor="w", pady=(0, 2))
+        self.progress = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate",
+                                         style="Horizontal.TProgressbar")
         self.progress.pack(fill="x")
 
-        log_container = tk.Frame(frame, bg="#f4f4f4")
+        log_container = tk.Frame(body, bg=COLOR_FIELD, highlightthickness=1, highlightbackground=COLOR_BORDER)
         log_container.pack(fill="both", expand=True)
-        self.log_text = tk.Text(log_container, font=("Consolas", 8), wrap="word", state="disabled")
+        self.log_text = tk.Text(log_container, font=FONT_MONO_SMALL, wrap="word", state="disabled",
+                                 bg=COLOR_FIELD, fg=COLOR_TEXT, relief="flat", bd=0,
+                                 highlightthickness=0, padx=4, pady=4)
         log_scroll = ttk.Scrollbar(log_container, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="right", fill="y")
-        self.log_text.tag_configure("failed", foreground="#D9534F")
+        self.log_text.tag_configure("failed", foreground=COLOR_DANGER)
 
     def append_log(self, text, tag=None):
         self.log_text.config(state="normal")

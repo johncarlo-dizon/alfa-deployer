@@ -1,0 +1,7 @@
+Remove-Item -Recurse -Force venv
+python -m venv venv
+venv\Scripts\activate
+pip install paramiko pyinstaller
+
+
+pyinstaller --onefile --windowed --name "Alfa Deployer" lib/main.py
