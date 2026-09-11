@@ -139,9 +139,15 @@ class AlfaDeployDashboard:
 
         header_row = tk.Frame(cmd_frame, bg="#f4f4f4")
         header_row.pack(fill="x")
-        self.run_after_deploy_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(header_row, text="Run After Deploy", variable=self.run_after_deploy_var, bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="right")
-
+        self.execution_order_var = tk.StringVar(value="files_first")
+        order_frame = tk.Frame(header_row, bg="#f4f4f4")
+        order_frame.pack(side="right")
+        tk.Label(order_frame, text="Order:", font=("Segoe UI", 8), bg="#f4f4f4").pack(side="left", padx=(0, 4))
+        tk.Radiobutton(order_frame, text="Files First", variable=self.execution_order_var,
+                       value="files_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
+        tk.Radiobutton(order_frame, text="Commands First", variable=self.execution_order_var,
+                       value="commands_first", bg="#f4f4f4", font=("Segoe UI", 8)).pack(side="left")
+        
         self.command_text = tk.Text(cmd_frame, height=4, font=("Consolas", 8))
         self.command_text.pack(fill="x", pady=(4, 0))
 
@@ -312,12 +318,20 @@ class AlfaDeployDashboard:
 
         remote_dir = self.remote_dir_entry.get().strip() or DEFAULT_REMOTE_DIR
         post_command = self.command_text.get("1.0", tk.END).strip()
-        run_after_deploy = self.run_after_deploy_var.get()
+        execution_order = self.execution_order_var.get()
+
+        order_note = ""
+        if post_command:
+            order_note = (
+                "\nOrder: files will upload first, then the command runs."
+                if execution_order == "files_first"
+                else "\nOrder: the command runs first, then files upload."
+            )
 
         if not messagebox.askyesno(
             "Confirm Deploy",
             f"This will upload {len(self.deploy_files)} file(s) to {remote_dir} on {len(selected_stores)} store PC(s)."
-            + ("\nA post-deploy command will also run." if run_after_deploy and post_command else "")
+            + order_note
             + "\n\nProceed?"
         ):
             return
@@ -335,7 +349,7 @@ class AlfaDeployDashboard:
         self.log_both(f"--- STARTING DEPLOY TO {len(selected_stores)} STORE(S) ---")
         self.log_both("==================================================")
 
-        start_deployment(selected_stores, self.deploy_files, remote_dir, post_command, run_after_deploy, self.log_queue)
+        start_deployment(selected_stores, self.deploy_files, remote_dir, post_command, execution_order, self.log_queue)
         self.root.after(100, self.poll_log_queue)
 
     def poll_log_queue(self):
@@ -505,7 +519,39 @@ def _upload_one_file(sftp, file_entry, remote_dir, log, detail):
     return False, None
 
 
-def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+def _upload_all_files(sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail):
+    uploaded_count = 0
+    total_files = len(deploy_files)
+    any_upload_failed = False
+
+    for i, file_entry in enumerate(deploy_files):
+        log_queue.put(("status", f"Uploading {file_entry['name']} to {ip} ({i + 1}/{total_files})...", None))
+        uploaded, remote_path = _upload_one_file(sftp, file_entry, remote_dir, log, detail)
+
+        if uploaded:
+            uploaded_count += 1
+            if file_entry.get("run_as_admin") and remote_path:
+                _run_elevated_once(ssh, remote_path, log, detail)
+        elif remote_path is None:
+            any_upload_failed = True
+
+    return uploaded_count, total_files, any_upload_failed
+
+
+def _run_post_command(ssh, post_command, ip, log_queue, log, detail):
+    """Returns True if there was nothing to run, or it ran successfully."""
+    if not post_command.strip():
+        return True
+    log_queue.put(("status", f"Running command on {ip}...", None))
+    ok_p, out_p, err_p = run_ssh_command_on_client(ssh, post_command.strip())
+    if ok_p:
+        detail(f"Command ran. Output: {out_p.strip() or '(none)'}")
+        return True
+    log(f"FAILED to run command: {err_p}", tag="failed")
+    return False
+
+
+def _deploy_to_store(store, deploy_files, remote_dir, post_command, execution_order, log_queue):
     ip, user, pwd = store["ip"], store["user"], store["pwd"]
     store_code = store.get("code", "")
     store_pos = store.get("pos", "")
@@ -544,33 +590,25 @@ def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_de
     uploaded_count = 0
     total_files = len(deploy_files)
     any_upload_failed = False
+    command_failed = False
 
     try:
         sftp = open_sftp(ssh)
         ensure_remote_dir(sftp, remote_dir)
         detail(f"Target directory ready: {remote_dir}")
 
-        for i, file_entry in enumerate(deploy_files):
-            log_queue.put(("status", f"Uploading {file_entry['name']} to {ip} ({i + 1}/{total_files})...", None))
-            uploaded, remote_path = _upload_one_file(sftp, file_entry, remote_dir, log, detail)
-
-            if uploaded:
-                uploaded_count += 1
-                if file_entry.get("run_as_admin") and remote_path:
-                    _run_elevated_once(ssh, remote_path, log, detail)
-            elif remote_path is None:
-                any_upload_failed = True
+        if execution_order == "commands_first":
+            command_failed = not _run_post_command(ssh, post_command, ip, log_queue, log, detail)
+            uploaded_count, total_files, any_upload_failed = _upload_all_files(
+                sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail
+            )
+        else:  # files_first (default)
+            uploaded_count, total_files, any_upload_failed = _upload_all_files(
+                sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail
+            )
+            command_failed = not _run_post_command(ssh, post_command, ip, log_queue, log, detail)
 
         sftp.close()
-
-        if run_after_deploy and post_command.strip():
-            log_queue.put(("status", f"Running post-deploy command on {ip}...", None))
-            ok_p, out_p, err_p = run_ssh_command_on_client(ssh, post_command.strip())
-            if ok_p:
-                detail(f"Post-deploy command ran. Output: {out_p.strip() or '(none)'}")
-            else:
-                log(f"FAILED to run post-deploy command: {err_p}", tag="failed")
-                any_upload_failed = True
 
     except Exception as e:
         log(f"FAILED during transfer: {e}", tag="failed")
@@ -578,23 +616,23 @@ def _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_de
     finally:
         ssh.close()
 
-    done_tag = "failed" if any_upload_failed else None
+    done_tag = "failed" if (any_upload_failed or command_failed) else None
     log(f"Completed: {uploaded_count}/{total_files} file(s) uploaded.", tag=done_tag)
 
-    if any_upload_failed or uploaded_count < total_files:
+    if any_upload_failed or command_failed or uploaded_count < total_files:
         log_queue.put(("failed_store", store_label, None))
     else:
         log_queue.put(("success_store", store_label, None))
     log_queue.put(("progress", 1, None))
 
 
-def start_deployment(selected_stores, deploy_files, remote_dir, post_command, run_after_deploy, log_queue):
+def start_deployment(selected_stores, deploy_files, remote_dir, post_command, execution_order, log_queue):
     """Kick off the whole batch on a background thread so the Tk main
     loop never blocks. Workers only ever push to log_queue — the caller
     is expected to poll it on the main thread (see dashboard.py)."""
 
     def deploy_worker(store):
-        _deploy_to_store(store, deploy_files, remote_dir, post_command, run_after_deploy, log_queue)
+        _deploy_to_store(store, deploy_files, remote_dir, post_command, execution_order, log_queue)
 
     def run_all():
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -602,81 +640,6 @@ def start_deployment(selected_stores, deploy_files, remote_dir, post_command, ru
         log_queue.put(("done", None, None))
 
     threading.Thread(target=run_all, daemon=True).start()
-
-deployment_logs.txt
-[2026-09-11 09:20:40] 
-==================================================
-[2026-09-11 09:20:40] --- STARTING DEPLOY TO 1 STORE(S) ---
-[2026-09-11 09:20:40] ==================================================
-[2026-09-11 09:20:40] [STORE: 127.0.0.1] Connecting...
-[2026-09-11 09:20:41] [STORE: 127.0.0.1] Connected and authenticated successfully.
-[2026-09-11 09:20:41] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
-[2026-09-11 09:20:41] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:20:41] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
-[2026-09-11 09:20:41] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
-[2026-09-11 09:20:41] 
-==================================================
-[2026-09-11 09:20:41] --- DEPLOYMENT FINISHED ---
-[2026-09-11 09:20:41] Stores completed successfully (1):
-[2026-09-11 09:20:41]   ✓ j3pc - server (127.0.0.1)
-[2026-09-11 09:20:41] ==================================================
-
-[2026-09-11 09:20:52] 
-==================================================
-[2026-09-11 09:20:52] --- STARTING DEPLOY TO 1 STORE(S) ---
-[2026-09-11 09:20:52] ==================================================
-[2026-09-11 09:20:52] [STORE: 127.0.0.1] Connecting...
-[2026-09-11 09:20:52] [STORE: 127.0.0.1] Connected and authenticated successfully.
-[2026-09-11 09:20:52] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
-[2026-09-11 09:20:53] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:20:53] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:20:53] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
-[2026-09-11 09:20:53] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
-[2026-09-11 09:20:53] 
-==================================================
-[2026-09-11 09:20:53] --- DEPLOYMENT FINISHED ---
-[2026-09-11 09:20:53] Stores completed successfully (1):
-[2026-09-11 09:20:53]   ✓ j3pc - server (127.0.0.1)
-[2026-09-11 09:20:53] ==================================================
-
-[2026-09-11 09:21:00] 
-==================================================
-[2026-09-11 09:21:00] --- STARTING DEPLOY TO 1 STORE(S) ---
-[2026-09-11 09:21:00] ==================================================
-[2026-09-11 09:21:00] [STORE: 127.0.0.1] Connecting...
-[2026-09-11 09:21:00] [STORE: 127.0.0.1] Connected and authenticated successfully.
-[2026-09-11 09:21:00] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
-[2026-09-11 09:21:01] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:21:01] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:21:01] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
-[2026-09-11 09:21:01] [STORE: 127.0.0.1] Post-deploy command ran. Output: (none)
-[2026-09-11 09:21:01] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
-[2026-09-11 09:21:01] 
-==================================================
-[2026-09-11 09:21:01] --- DEPLOYMENT FINISHED ---
-[2026-09-11 09:21:01] Stores completed successfully (1):
-[2026-09-11 09:21:01]   ✓ j3pc - server (127.0.0.1)
-[2026-09-11 09:21:01] ==================================================
-
-[2026-09-11 09:22:12] 
-==================================================
-[2026-09-11 09:22:12] --- STARTING DEPLOY TO 1 STORE(S) ---
-[2026-09-11 09:22:12] ==================================================
-[2026-09-11 09:22:12] [STORE: 127.0.0.1] Connecting...
-[2026-09-11 09:22:12] [STORE: 127.0.0.1] Connected and authenticated successfully.
-[2026-09-11 09:22:12] [STORE: 127.0.0.1] Target directory ready: C:\Reminder_v2
-[2026-09-11 09:22:12] [STORE: 127.0.0.1] Uploaded Alfamart_Reminder.exe -> C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:22:12] [STORE: 127.0.0.1] Launched elevated: C:/Reminder_v2/Alfamart_Reminder.exe
-[2026-09-11 09:22:13] [STORE: 127.0.0.1] Uploaded Master_Deployer.exe -> C:/Reminder_v2/Master_Deployer.exe
-[2026-09-11 09:22:13] [STORE: 127.0.0.1] Post-deploy command ran. Output: (none)
-[2026-09-11 09:22:13] [STORE: 127.0.0.1] Completed: 2/2 file(s) uploaded.
-[2026-09-11 09:22:13] 
-==================================================
-[2026-09-11 09:22:13] --- DEPLOYMENT FINISHED ---
-[2026-09-11 09:22:13] Stores completed successfully (1):
-[2026-09-11 09:22:13]   ✓ j3pc - server (127.0.0.1)
-[2026-09-11 09:22:13] ==================================================
-
 
 file_options_dialog.py
 import tkinter as tk

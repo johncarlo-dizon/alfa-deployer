@@ -7,12 +7,47 @@ from config import MAX_WORKERS, UPLOAD_MAX_ATTEMPTS, UPLOAD_RETRY_DELAY_SEC
 from ssh_utils import open_ssh_client, run_ssh_command_on_client, test_connection
 from sftp_utils import open_sftp, ensure_remote_dir, remote_file_exists, upload_file
 
+# How long to wait for an elevated one-shot task to leave the "Running"
+# state before we give up and move on anyway (seconds).
+ELEVATED_RUN_TIMEOUT_SEC = 30
+ELEVATED_RUN_POLL_INTERVAL_SEC = 1.0
+
+
+def _wait_for_task_completion(ssh, task_name, log, timeout_sec=ELEVATED_RUN_TIMEOUT_SEC,
+                               poll_interval=ELEVATED_RUN_POLL_INTERVAL_SEC):
+    """Poll schtasks until the one-shot task is no longer reported as
+    'Running', or until timeout_sec elapses. Returns True if the task
+    finished within the timeout, False if we gave up waiting.
+
+    This is what actually makes "run as admin" a blocking step. Without
+    it, schtasks /Run returns as soon as the task is *accepted* by the
+    scheduler, not once the app has actually launched, read its flag
+    file, and finished doing whatever first-run work it does -- so any
+    step that happens right after (like deleting an init flag) can race
+    ahead of the app and run before the app ever sees the flag.
+    """
+    waited = 0.0
+    while waited < timeout_sec:
+        ok, out, _err = run_ssh_command_on_client(ssh, f'schtasks /Query /TN "{task_name}" /FO LIST')
+        if ok and "Running" not in out:
+            return True
+        time.sleep(poll_interval)
+        waited += poll_interval
+    log(f"Timed out after {timeout_sec}s waiting for elevated task {task_name} to finish.", tag="failed")
+    return False
+
 
 def _run_elevated_once(ssh, remote_exe_path, log, detail):
     """Fire a remote .exe with an elevated (Highest) run level, without
     needing an interactive UAC click, by wrapping it in a throwaway
     scheduled task. Same idiom the reminder dashboard uses to install
-    scheduled tasks — here it's a create -> run -> delete one-shot."""
+    scheduled tasks -- here it's a create -> run -> wait -> delete
+    one-shot.
+
+    Blocks until the task finishes (or times out) before deleting it,
+    so callers can rely on the app having actually run by the time this
+    function returns.
+    """
     task_name = f"AlfaDeploy_Run_{int(time.time() * 1000)}"
 
     create_cmd = (
@@ -33,7 +68,16 @@ def _run_elevated_once(ssh, remote_exe_path, log, detail):
         run_ssh_command_on_client(ssh, delete_cmd)  # best-effort cleanup
         return False
 
-    detail(f"Launched elevated: {remote_exe_path}")
+    finished = _wait_for_task_completion(ssh, task_name, log)
+    if not finished:
+        # We waited as long as we reasonably can. Clean up the task
+        # entry either way so it doesn't linger, but let the caller
+        # know timing wasn't confirmed.
+        detail(f"Launched elevated (did not confirm completion in time): {remote_exe_path}")
+        run_ssh_command_on_client(ssh, delete_cmd)
+        return False
+
+    detail(f"Launched elevated and confirmed finished: {remote_exe_path}")
     run_ssh_command_on_client(ssh, delete_cmd)  # best-effort cleanup, ignore result
     return True
 
@@ -66,6 +110,9 @@ def _upload_one_file(sftp, file_entry, remote_dir, log, detail):
 
 
 def _upload_all_files(sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, detail):
+    """Upload every queued file. Files flagged run_as_admin are launched
+    (and waited on, see _run_elevated_once) right after their own
+    upload completes."""
     uploaded_count = 0
     total_files = len(deploy_files)
     any_upload_failed = False
@@ -77,6 +124,7 @@ def _upload_all_files(sftp, ssh, deploy_files, remote_dir, ip, log_queue, log, d
         if uploaded:
             uploaded_count += 1
             if file_entry.get("run_as_admin") and remote_path:
+                log_queue.put(("status", f"Running {file_entry['name']} as admin on {ip}...", None))
                 _run_elevated_once(ssh, remote_path, log, detail)
         elif remote_path is None:
             any_upload_failed = True
